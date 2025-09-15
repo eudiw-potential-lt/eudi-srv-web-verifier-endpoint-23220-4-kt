@@ -39,11 +39,13 @@ import eu.europa.ec.eudi.verifier.endpoint.adapter.out.jose.ParseJarmOptionNimbu
 import eu.europa.ec.eudi.verifier.endpoint.adapter.out.jose.SignRequestObjectNimbus
 import eu.europa.ec.eudi.verifier.endpoint.adapter.out.jose.VerifyJarmEncryptedJwtNimbus
 import eu.europa.ec.eudi.verifier.endpoint.adapter.out.persistence.PresentationInMemoryRepo
+import eu.europa.ec.eudi.verifier.endpoint.adapter.out.persistence.registration.RegistrationFirestoreRepo
+import eu.europa.ec.eudi.verifier.endpoint.adapter.out.persistence.registration.RegistrationInMemoryRepo
 import eu.europa.ec.eudi.verifier.endpoint.domain.*
 import eu.europa.ec.eudi.verifier.endpoint.port.input.*
-import eu.europa.ec.eudi.verifier.endpoint.port.input.persistence.RegistrationRepository
 import eu.europa.ec.eudi.verifier.endpoint.port.out.cfg.CreateQueryWalletResponseRedirectUri
 import eu.europa.ec.eudi.verifier.endpoint.port.out.cfg.GenerateResponseCode
+import eu.europa.ec.eudi.verifier.endpoint.port.out.persistence.registration.RegistrationRepo
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.json.Json
 import org.slf4j.LoggerFactory
@@ -70,24 +72,19 @@ private val log = LoggerFactory.getLogger(VerifierApplication::class.java)
 @OptIn(ExperimentalSerializationApi::class)
 internal fun beans(clock: Clock) = beans {
     val trustedIssuers: KeyStore? by lazy {
-        env.getProperty("trustedIssuers.keystore.path")
-            ?.takeIf { it.isNotBlank() }
-            ?.let { keystorePath ->
-                val keystoreType = env.getRequiredProperty("trustedIssuers.keystore.type")
-                val keystorePassword = env.getProperty("trustedIssuers.keystore.password")
+        env.getProperty("trustedIssuers.keystore.path")?.takeIf { it.isNotBlank() }?.let {
+                keystorePath ->
+            val keystoreType = env.getRequiredProperty("trustedIssuers.keystore.type")
+            val keystorePassword =
+                env.getProperty("trustedIssuers.keystore.password")
                     ?.takeIf { it.isNotBlank() }
                     ?.toCharArray()
 
-                log.info("Loading trusted issuers' certificates from '$keystorePath'")
-                DefaultResourceLoader().getResource(keystorePath)
-                    .inputStream
-                    .use {
-                        KeyStore.getInstance(keystoreType)
-                            .apply {
-                                load(it, keystorePassword)
-                            }
-                    }
+            log.info("Loading trusted issuers' certificates from '$keystorePath'")
+            DefaultResourceLoader().getResource(keystorePath).inputStream.use {
+                KeyStore.getInstance(keystoreType).apply { load(it, keystorePassword) }
             }
+        }
     }
 
     //
@@ -113,9 +110,25 @@ internal fun beans(clock: Clock) = beans {
 
     bean { CreateQueryWalletResponseRedirectUri.Simple }
 
-    bean { getFirestoreOptions(env) }
+    // Registration repository factory
+    bean<RegistrationRepo> {
+        when (
+            env.getProperty(
+                "registrations.persistence.type",
+                RegistrationPersistenceTypeEnum::class.java,
+                RegistrationPersistenceTypeEnum.InMemory,
+            )
+        ) {
+            RegistrationPersistenceTypeEnum.Firestore -> {
+                val firestore = getFirestoreOptions(env).service
+                val collectionName =
+                    env.getProperty("registrations.firestore.collectionName", "stats")
+                RegistrationFirestoreRepo(firestore, collectionName)
+            }
+            RegistrationPersistenceTypeEnum.InMemory -> RegistrationInMemoryRepo()
+        }
+    }
 
-    bean { RegistrationRepository(ref(), env.getProperty("registrations.firestore.collectionName", "stats")) }
     //
     // Use cases
     //
@@ -132,7 +145,7 @@ internal fun beans(clock: Clock) = beans {
             WalletApi.presentationDefinitionByReference(env.publicUrl()),
             ref(),
             ref(),
-            ref(),
+            ref<RegistrationRepo>(),
         )
     }
 
@@ -149,8 +162,11 @@ internal fun beans(clock: Clock) = beans {
         )
     }
     bean {
-        val maxAge = Duration.parse(env.getProperty("verifier.presentations.cleanup.maxAge", "P10D"))
-        require(!maxAge.isZero && !maxAge.isNegative) { "'verifier.presentations.cleanup.maxAge' cannot be zero or negative" }
+        val maxAge =
+            Duration.parse(env.getProperty("verifier.presentations.cleanup.maxAge", "P10D"))
+        require(!maxAge.isZero && !maxAge.isNegative) {
+            "'verifier.presentations.cleanup.maxAge' cannot be zero or negative"
+        }
 
         DeleteOldPresentationsLive(clock, maxAge, ref())
     }
@@ -180,22 +196,28 @@ internal fun beans(clock: Clock) = beans {
     //
 
     bean {
-        val walletApi = WalletApi(
-            ref(),
-            ref(),
-            ref(),
-            ref(),
-            ref<VerifierConfig>().verifierId.jarSigning.key,
-        )
+        val walletApi =
+            WalletApi(
+                ref(),
+                ref(),
+                ref(),
+                ref(),
+                ref<VerifierConfig>().verifierId.jarSigning.key,
+            )
         val verifierApi = VerifierApi(ref(), ref(), ref())
         val staticContent = StaticContent()
-        val swaggerUi = SwaggerUi(
-            publicResourcesBasePath = env.getRequiredProperty("spring.webflux.static-path-pattern").removeSuffix("/**"),
-            webJarResourcesBasePath = env.getRequiredProperty("spring.webflux.webjars-path-pattern")
-                .removeSuffix("/**"),
-        )
+        val swaggerUi =
+            SwaggerUi(
+                publicResourcesBasePath =
+                    env.getRequiredProperty("spring.webflux.static-path-pattern")
+                        .removeSuffix("/**"),
+                webJarResourcesBasePath =
+                    env.getRequiredProperty("spring.webflux.webjars-path-pattern")
+                        .removeSuffix("/**"),
+            )
         val utilityApi = UtilityApi(ref(), ref(), ref())
-        walletApi.route
+        walletApi
+            .route
             .and(verifierApi.route)
             .and(staticContent.route)
             .and(swaggerUi.route)
@@ -224,7 +246,11 @@ internal fun beans(clock: Clock) = beans {
                 configurationSource = CorsConfigurationSource {
                     CorsConfiguration().apply {
                         fun getOptionalList(name: String): NonEmptyList<String>? =
-                            env.getOptionalList(name = name, filter = { it.isNotBlank() }, transform = { it.trim() })
+                            env.getOptionalList(
+                                name = name,
+                                filter = { it.isNotBlank() },
+                                transform = { it.trim() },
+                            )
 
                         allowedOrigins = getOptionalList("cors.origins")
                         allowedOriginPatterns = getOptionalList("cors.originPatterns")
@@ -249,6 +275,11 @@ private enum class EmbedOptionEnum {
     ByReference,
 }
 
+private enum class RegistrationPersistenceTypeEnum {
+    InMemory,
+    Firestore,
+}
+
 private enum class SigningKeyEnum {
     GenerateRandom,
     LoadFromKeystore,
@@ -260,44 +291,56 @@ private fun jarSigningConfig(environment: Environment, clock: Clock): SigningCon
     val key = run {
         fun loadFromKeystore(): JWK {
             val keystoreResource = run {
-                val keystoreLocation = environment.getRequiredProperty("verifier.jar.signing.key.keystore")
+                val keystoreLocation =
+                    environment.getRequiredProperty("verifier.jar.signing.key.keystore")
                 log.info("Will try to load Keystore from: '{}'", keystoreLocation)
-                val keystoreResource = DefaultResourceLoader().getResource(keystoreLocation)
-                    .some()
-                    .filter { it.exists() }
-                    .recover {
-                        log.warn(
-                            "Could not find Keystore at '{}'. Fallback to '{}'",
-                            keystoreLocation,
-                            keystoreDefaultLocation,
-                        )
-                        FileSystemResource(keystoreDefaultLocation)
-                            .some()
-                            .filter { it.exists() }
-                            .bind()
-                    }
-                    .getOrNull()
-                checkNotNull(keystoreResource) { "Could not load Keystore either from '$keystoreLocation' or '$keystoreDefaultLocation'" }
+                val keystoreResource =
+                    DefaultResourceLoader()
+                        .getResource(keystoreLocation)
+                        .some()
+                        .filter { it.exists() }
+                        .recover {
+                            log.warn(
+                                "Could not find Keystore at '{}'. Fallback to '{}'",
+                                keystoreLocation,
+                                keystoreDefaultLocation,
+                            )
+                            FileSystemResource(keystoreDefaultLocation)
+                                .some()
+                                .filter { it.exists() }
+                                .bind()
+                        }
+                        .getOrNull()
+                checkNotNull(keystoreResource) {
+                    "Could not load Keystore either from '$keystoreLocation' or '$keystoreDefaultLocation'"
+                }
             }
 
             val keystoreType =
-                environment.getProperty("verifier.jar.signing.key.keystore.type", KeyStore.getDefaultType())
+                environment.getProperty(
+                    "verifier.jar.signing.key.keystore.type",
+                    KeyStore.getDefaultType(),
+                )
             val keystorePassword =
-                environment.getProperty("verifier.jar.signing.key.keystore.password")?.takeIf { it.isNotBlank() }
-            val keyAlias =
-                environment.getRequiredProperty("verifier.jar.signing.key.alias")
+                environment.getProperty("verifier.jar.signing.key.keystore.password")?.takeIf {
+                    it.isNotBlank()
+                }
+            val keyAlias = environment.getRequiredProperty("verifier.jar.signing.key.alias")
             val keyPassword =
-                environment.getProperty("verifier.jar.signing.key.password")?.takeIf { it.isNotBlank() }
+                environment.getProperty("verifier.jar.signing.key.password")?.takeIf {
+                    it.isNotBlank()
+                }
 
             return keystoreResource.inputStream.use { inputStream ->
                 val keystore = KeyStore.getInstance(keystoreType)
                 keystore.load(inputStream, keystorePassword?.toCharArray())
 
                 val jwk = JWK.load(keystore, keyAlias, keyPassword?.toCharArray())
-                val chain = keystore.getCertificateChain(keyAlias)
-                    .orEmpty()
-                    .map { certificate -> certificate as X509Certificate }
-                    .toList()
+                val chain =
+                    keystore.getCertificateChain(keyAlias)
+                        .orEmpty()
+                        .map { certificate -> certificate as X509Certificate }
+                        .toList()
 
                 when {
                     chain.isNotEmpty() -> jwk.withCertificateChain(chain)
@@ -319,7 +362,10 @@ private fun jarSigningConfig(environment: Environment, clock: Clock): SigningCon
         }
     }
 
-    val algorithm = environment.getProperty("verifier.jar.signing.algorithm", "ES256").let(JWSAlgorithm::parse)
+    val algorithm =
+        environment
+            .getProperty("verifier.jar.signing.algorithm", "ES256")
+            .let(JWSAlgorithm::parse)
 
     return SigningConfig(key, algorithm)
 }
@@ -330,7 +376,10 @@ private fun verifierConfig(environment: Environment, clock: Clock): VerifierConf
         val jarSigning = jarSigningConfig(environment, clock)
 
         val factory =
-            when (val clientIdScheme = environment.getProperty("verifier.clientIdScheme", "pre-registered")) {
+            when (
+                val clientIdScheme =
+                    environment.getProperty("verifier.clientIdScheme", "pre-registered")
+            ) {
                 "pre-registered" -> VerifierId::PreRegistered
                 "x509_san_dns" -> VerifierId::X509SanDns
                 "x509_san_uri" -> VerifierId::X509SanUri
@@ -340,24 +389,31 @@ private fun verifierConfig(environment: Environment, clock: Clock): VerifierConf
     }
 
     val publicUrl = environment.publicUrl()
-    val requestJarOption = environment.getProperty("verifier.requestJwt.embed", EmbedOptionEnum::class.java).let {
-        when (it) {
-            ByValue -> EmbedOption.ByValue
-            ByReference, null -> WalletApi.requestJwtByReference(environment.publicUrl())
+    val requestJarOption =
+        environment.getProperty("verifier.requestJwt.embed", EmbedOptionEnum::class.java).let {
+            when (it) {
+                ByValue -> EmbedOption.ByValue
+                ByReference, null -> WalletApi.requestJwtByReference(environment.publicUrl())
+            }
         }
-    }
     val responseModeOption =
         environment.getProperty("verifier.response.mode", ResponseModeOption::class.java)
             ?: ResponseModeOption.DirectPostJwt
 
     val presentationDefinitionEmbedOption =
-        environment.getProperty("verifier.presentationDefinition.embed", EmbedOptionEnum::class.java).let {
-            when (it) {
-                ByReference -> WalletApi.presentationDefinitionByReference(publicUrl)
-                ByValue, null -> EmbedOption.ByValue
+        environment.getProperty(
+            "verifier.presentationDefinition.embed",
+            EmbedOptionEnum::class.java,
+        )
+            .let {
+                when (it) {
+                    ByReference -> WalletApi.presentationDefinitionByReference(publicUrl)
+                    ByValue, null -> EmbedOption.ByValue
+                }
             }
-        }
-    val maxAge = environment.getProperty("verifier.maxAge", Duration::class.java) ?: Duration.ofMinutes(5)
+    val maxAge =
+        environment.getProperty("verifier.maxAge", Duration::class.java)
+            ?: Duration.ofMinutes(5)
 
     return VerifierConfig(
         verifierId = verifierId,
@@ -371,12 +427,13 @@ private fun verifierConfig(environment: Environment, clock: Clock): VerifierConf
 }
 
 private fun Environment.clientMetaData(publicUrl: String): ClientMetaData {
-    val jwkOption = getProperty("verifier.jwk.embed", EmbedOptionEnum::class.java).let {
-        when (it) {
-            ByReference -> WalletApi.jarmJwksByReference(publicUrl)
-            ByValue, null -> EmbedOption.ByValue
+    val jwkOption =
+        getProperty("verifier.jwk.embed", EmbedOptionEnum::class.java).let {
+            when (it) {
+                ByReference -> WalletApi.jarmJwksByReference(publicUrl)
+                ByValue, null -> EmbedOption.ByValue
+            }
         }
-    }
 
     val authorizationSignedResponseAlg =
         getProperty("verifier.clientMetadata.authorizationSignedResponseAlg")
@@ -385,7 +442,8 @@ private fun Environment.clientMetaData(publicUrl: String): ClientMetaData {
     val authorizationEncryptedResponseEnc =
         getProperty("verifier.clientMetadata.authorizationEncryptedResponseEnc")
 
-    val defaultJarmOption = ParseJarmOptionNimbus(null, JWEAlgorithm.ECDH_ES.name, EncryptionMethod.A256GCM.name)
+    val defaultJarmOption =
+        ParseJarmOptionNimbus(null, JWEAlgorithm.ECDH_ES.name, EncryptionMethod.A256GCM.name)
     checkNotNull(defaultJarmOption)
 
     return ClientMetaData(
@@ -393,26 +451,30 @@ private fun Environment.clientMetaData(publicUrl: String): ClientMetaData {
         idTokenSignedResponseAlg = JWSAlgorithm.RS256.name,
         idTokenEncryptedResponseAlg = JWEAlgorithm.RSA_OAEP_256.name,
         idTokenEncryptedResponseEnc = EncryptionMethod.A128CBC_HS256.name,
-        subjectSyntaxTypesSupported = listOf(
-            "urn:ietf:params:oauth:jwk-thumbprint",
-        ),
-        jarmOption = ParseJarmOptionNimbus.invoke(
-            authorizationSignedResponseAlg,
-            authorizationEncryptedResponseAlg,
-            authorizationEncryptedResponseEnc,
-        ) ?: defaultJarmOption,
+        subjectSyntaxTypesSupported =
+            listOf(
+                "urn:ietf:params:oauth:jwk-thumbprint",
+            ),
+        jarmOption =
+            ParseJarmOptionNimbus.invoke(
+                authorizationSignedResponseAlg,
+                authorizationEncryptedResponseAlg,
+                authorizationEncryptedResponseEnc,
+            )
+                ?: defaultJarmOption,
     )
 }
 
-/**
- * Gets the public URL of the Verifier endpoint. Corresponds to `verifier.publicUrl` property.
- */
-private fun Environment.publicUrl(): String = getProperty("verifier.publicUrl", "http://localhost:8080")
-private fun Environment.registrationsDatabaseId(): String = getProperty("registrations.firestore.databaseId", "issuerpid")
+/** Gets the public URL of the Verifier endpoint. Corresponds to `verifier.publicUrl` property. */
+private fun Environment.publicUrl(): String =
+    getProperty("verifier.publicUrl", "http://localhost:8080")
+
+private fun Environment.registrationsDatabaseId(): String =
+    getProperty("registrations.firestore.databaseId", "issuerpid")
 
 /**
- * Creates a copy of this [JWK] and sets the provided [X509Certificate] certificate chain.
- * For the operation to succeed, the following must hold true:
+ * Creates a copy of this [JWK] and sets the provided [X509Certificate] certificate chain. For the
+ * operation to succeed, the following must hold true:
  * 1. [chain] cannot be empty
  * 2. The leaf certificate of the [chain] must match the leaf certificate of this [JWK]
  */
@@ -434,7 +496,8 @@ private fun JWK.withCertificateChain(chain: List<X509Certificate>): JWK {
 }
 
 /**
- * Gets the value of a property that contains a comma-separated list. A list is returned when it contains values.
+ * Gets the value of a property that contains a comma-separated list. A list is returned when it
+ * contains values.
  *
  * @receiver the configured Spring [Environment] from which to load the property
  * @param name the property to load

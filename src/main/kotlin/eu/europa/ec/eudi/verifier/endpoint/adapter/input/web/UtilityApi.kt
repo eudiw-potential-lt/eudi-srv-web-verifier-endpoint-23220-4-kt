@@ -21,7 +21,7 @@ import eu.europa.ec.eudi.verifier.endpoint.port.input.DeviceResponseValidationRe
 import eu.europa.ec.eudi.verifier.endpoint.port.input.SdJwtVcValidationResult
 import eu.europa.ec.eudi.verifier.endpoint.port.input.ValidateMsoMdocDeviceResponse
 import eu.europa.ec.eudi.verifier.endpoint.port.input.ValidateSdJwtVc
-import eu.europa.ec.eudi.verifier.endpoint.port.input.persistence.RegistrationRepository
+import eu.europa.ec.eudi.verifier.endpoint.port.out.persistence.registration.RegistrationRepo
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import org.slf4j.Logger
@@ -40,7 +40,7 @@ data class RegistrationDataStatusTO(
 internal class UtilityApi(
     private val validateMsoMdocDeviceResponse: ValidateMsoMdocDeviceResponse,
     private val validateSdJwtVc: ValidateSdJwtVc,
-    private val registrationRepository: RegistrationRepository,
+    private val registrationRepository: RegistrationRepo,
 ) {
 
     private val logger: Logger = LoggerFactory.getLogger(UtilityApi::class.java)
@@ -115,7 +115,7 @@ internal class UtilityApi(
         val input = req.awaitBody<RegistrationDataStatusTO>()
 
         logger.info("Handling RegistrationData status update for tx ${transactionId.value} to status: ${input.status}. ...")
-        return done(registrationRepository.updateStatus(input.status, transactionId))
+        return done(registrationRepository.updateRegistrationTransactionStatus(input.status, transactionId))
     }
 
     companion object {

@@ -22,7 +22,7 @@ import arrow.core.raise.either
 import arrow.core.raise.ensure
 import eu.europa.ec.eudi.prex.PresentationDefinition
 import eu.europa.ec.eudi.verifier.endpoint.domain.*
-import eu.europa.ec.eudi.verifier.endpoint.port.input.persistence.RegistrationRepositoryObject
+import eu.europa.ec.eudi.verifier.endpoint.port.input.registration.RegistrationTO
 import eu.europa.ec.eudi.verifier.endpoint.port.out.cfg.CreateQueryWalletResponseRedirectUri
 import eu.europa.ec.eudi.verifier.endpoint.port.out.cfg.GenerateRequestId
 import eu.europa.ec.eudi.verifier.endpoint.port.out.cfg.GenerateTransactionId
@@ -31,6 +31,7 @@ import eu.europa.ec.eudi.verifier.endpoint.port.out.jose.SignRequestObject
 import eu.europa.ec.eudi.verifier.endpoint.port.out.persistence.PresentationEvent
 import eu.europa.ec.eudi.verifier.endpoint.port.out.persistence.PublishPresentationEvent
 import eu.europa.ec.eudi.verifier.endpoint.port.out.persistence.StorePresentation
+import eu.europa.ec.eudi.verifier.endpoint.port.out.persistence.registration.RegistrationRepo
 import kotlinx.serialization.ExperimentalSerializationApi
 import kotlinx.serialization.Required
 import kotlinx.serialization.SerialName
@@ -84,16 +85,6 @@ enum class EmbedModeTO {
 }
 
 @Serializable
-data class RegistrationDataTO(
-    @SerialName("readerCountry") val readerCountry: String? = null,
-    @SerialName("readerCompanyName") val readerCompanyName: String? = null,
-    @SerialName("holderTesterInitials") val holderTesterInitials: String? = null,
-    @SerialName("holderDevice") val holderDevice: String? = null,
-    @SerialName("dataset") val dataset: String? = null,
-    @SerialName("testScenario") val testScenario: String? = null,
-)
-
-@Serializable
 data class InitTransactionTO(
     @SerialName("type") val type: PresentationTypeTO = PresentationTypeTO.IdAndVpTokenRequest,
     @SerialName("id_token_type") val idTokenType: IdTokenTypeTO? = null,
@@ -107,7 +98,7 @@ data class InitTransactionTO(
     val presentationDefinitionMode: EmbedModeTO? = null,
     @SerialName("wallet_response_redirect_uri_template")
     val redirectUriTemplate: String? = null,
-    @SerialName("registration_data") val registrationData: RegistrationDataTO? = null,
+    @SerialName("registration_data") val registrationData: RegistrationTO? = null,
 )
 
 /** Possible validation errors of caller's input */
@@ -167,7 +158,7 @@ class InitTransactionLive(
     private val presentationDefinitionByReference: EmbedOption.ByReference<RequestId>,
     private val createQueryWalletResponseRedirectUri: CreateQueryWalletResponseRedirectUri,
     private val publishPresentationEvent: PublishPresentationEvent,
-    private val registrationRepository: RegistrationRepositoryObject,
+    private val registrationRepository: RegistrationRepo,
 ) : InitTransaction {
 
     override suspend fun invoke(
@@ -199,8 +190,11 @@ class InitTransactionLive(
             createRequest(requestedPresentation, jarMode(initTransactionTO))
 
         when (val regData = initTransactionTO.registrationData) {
-            is RegistrationDataTO -> {
-                registrationRepository.saveRegistrationData(regData, requestedPresentation.id)
+            is RegistrationTO -> {
+                registrationRepository.storeRegistration(
+                    regData,
+                    requestedPresentation.id,
+                )
             }
         }
 
@@ -237,7 +231,11 @@ class InitTransactionLive(
         when (requestJarOption) {
             is EmbedOption.ByValue -> {
                 val jwt =
-                    signRequestObject(verifierConfig, clock, requestedPresentation)
+                    signRequestObject(
+                        verifierConfig,
+                        clock,
+                        requestedPresentation,
+                    )
                         .getOrThrow()
                 val requestObjectRetrieved =
                     requestedPresentation.retrieveRequestObject(clock).getOrThrow()
@@ -327,9 +325,13 @@ internal fun InitTransactionTO.toDomain(): Either<ValidationError, Pair<Nonce, P
         fun requiredPresentationQuery(): PresentationQuery =
             when {
                 presentationDefinition != null && dcqlQuery == null ->
-                    PresentationQuery.ByPresentationDefinition(presentationDefinition)
+                    PresentationQuery.ByPresentationDefinition(
+                        presentationDefinition,
+                    )
                 presentationDefinition == null && dcqlQuery != null ->
-                    PresentationQuery.ByDigitalCredentialsQueryLanguage(dcqlQuery)
+                    PresentationQuery.ByDigitalCredentialsQueryLanguage(
+                        dcqlQuery,
+                    )
                 presentationDefinition == null && dcqlQuery == null ->
                     raise(ValidationError.MissingPresentationQuery)
                 else -> raise(ValidationError.MultiplePresentationQueries)

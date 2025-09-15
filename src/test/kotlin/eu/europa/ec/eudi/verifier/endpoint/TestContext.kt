@@ -24,11 +24,11 @@ import eu.europa.ec.eudi.verifier.endpoint.adapter.out.jose.GenerateEphemeralEnc
 import eu.europa.ec.eudi.verifier.endpoint.adapter.out.jose.ParseJarmOptionNimbus
 import eu.europa.ec.eudi.verifier.endpoint.adapter.out.jose.SignRequestObjectNimbus
 import eu.europa.ec.eudi.verifier.endpoint.adapter.out.persistence.PresentationInMemoryRepo
+import eu.europa.ec.eudi.verifier.endpoint.adapter.out.persistence.registration.RegistrationInMemoryRepo
 import eu.europa.ec.eudi.verifier.endpoint.domain.*
 import eu.europa.ec.eudi.verifier.endpoint.domain.EmbedOption.ByValue
 import eu.europa.ec.eudi.verifier.endpoint.port.input.InitTransaction
 import eu.europa.ec.eudi.verifier.endpoint.port.input.InitTransactionLive
-import eu.europa.ec.eudi.verifier.endpoint.port.input.persistence.RegistrationInMemoryRepo
 import eu.europa.ec.eudi.verifier.endpoint.port.out.cfg.CreateQueryWalletResponseRedirectUri
 import eu.europa.ec.eudi.verifier.endpoint.port.out.cfg.GenerateRequestId
 import eu.europa.ec.eudi.verifier.endpoint.port.out.cfg.GenerateTransactionId
@@ -55,7 +55,8 @@ object TestContext {
     private val generateRequestId = GenerateRequestId.fixed(testRequestId)
     private val rsaJwk = run {
         ClassPathResource("test-cert.jks").inputStream.use {
-            val keystore = KeyStore.getInstance("JKS").apply { load(it, "".toCharArray()) }
+            val keystore =
+                KeyStore.getInstance("JKS").apply { load(it, "".toCharArray()) }
             RSAKey.load(keystore, "client-id", "".toCharArray())
         }
     }

@@ -43,8 +43,7 @@ val waltIdExample =
     """.trimIndent()
 
 /**
- * This is from
- * https://www.authlete.com/developers/oid4vci/#425-mdoc
+ * This is from https://www.authlete.com/developers/oid4vci/#425-mdoc
  *
  * It contains an mDL (IssuerSigned) in base64 url-encoded
  */
@@ -58,10 +57,11 @@ class ExamplesTest {
     @Test
     fun `waltId example is valid, skipping x5c checks`() {
         val issuedAt = ZonedDateTime.parse("2023-08-02T16:22:19.252519705Z")
-        val documentValidator = DocumentValidator(
-            clock = Clock.fixed(issuedAt.toInstant(), issuedAt.zone),
-            x5CShouldBe = X5CShouldBe.Ignored,
-        )
+        val documentValidator =
+            DocumentValidator(
+                clock = Clock.fixed(issuedAt.toInstant(), issuedAt.zone),
+                x5CShouldBe = X5CShouldBe.Ignored,
+            )
         val document = MDoc.fromCBORHex(waltIdExample)
         documentValidator.ensureValid(document).getOrElse { fail(it.toString()) }
     }
@@ -76,9 +76,12 @@ class ExamplesTest {
         }
 
         val document = issuerSigned().asMDocWithDocType("org.iso.18013.5.1.mDL")
-        val documentValidator = DocumentValidator(
-            x5CShouldBe = X5CShouldBe.Ignored,
-        )
+        val issuedAt = ZonedDateTime.parse("2024-08-02T16:22:19.252519705Z")
+        val documentValidator =
+            DocumentValidator(
+                clock = Clock.fixed(issuedAt.toInstant(), issuedAt.zone),
+                x5CShouldBe = X5CShouldBe.Ignored,
+            )
         documentValidator.ensureValid(document).getOrElse { fail(it.toString()) }
     }
 }
